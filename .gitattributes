@@ -1,0 +1,3 @@
+# Source is edited on Windows and built in WSL; keep LF everywhere so scripts run in Linux.
+* text=auto eol=lf
+*.png binary

@@ -1,0 +1,306 @@
+# Tessera's settings, in the order the configuration menu shows them (design §6).
+#
+# Every `[[item]]` is either a menu or an option. Options belong to the menu
+# named by `parent`; the value lives in config.toml as `[section] name = …`,
+# where `key = "section.name"`.
+#
+# Fields:
+#   kind        menu | bool | int | string | choice
+#   prompt      the text shown in the menu
+#   help        shown with <?>
+#   default     used when config.toml does not set the key
+#   apply       live (takes effect on save) | restart (next time the program starts)
+#   min, max    int range, inclusive
+#   choices     allowed values for a choice
+#   pattern     for strings: "binding" checks the Mod+Shift+key shape
+#   depends_on  boolean expression over bool keys: a, !a, a && b, a || b, (…)
+#   select      bool keys forced on while this bool is on (shown as -*-)
+#
+# Only add an option when something reads it. An option that does nothing is
+# worse than no option.
+
+# ---------------------------------------------------------------- General
+
+[[item]]
+kind = "menu"
+id = "general"
+prompt = "General"
+
+[[item]]
+kind = "string"
+key = "general.terminal"
+parent = "general"
+prompt = "Terminal command"
+default = "foot"
+apply = "live"
+help = """
+The terminal opened by Mod+Return and by the launcher's terminal entry.
+Arguments are allowed and are split on spaces, honouring quotes."""
+
+[[item]]
+kind = "string"
+key = "general.editor"
+parent = "general"
+prompt = "Editor"
+default = "nano"
+apply = "live"
+help = """
+The editor <E> opens scripts in, from Scripts & services, inside a terminal
+tiled beside the launcher. Arguments are allowed, e.g. "nvim -p".
+If it is not installed, $VISUAL, $EDITOR and then common editors are tried."""
+
+[[item]]
+kind = "string"
+key = "general.qt_platform_theme"
+parent = "general"
+prompt = "Qt theme plugin"
+default = "kde"
+apply = "live"
+help = """
+QT_QPA_PLATFORMTHEME for programs Tessera starts: the plugin that gives Qt
+apps their colours, fonts and icons. "kde" uses Breeze and your KDE settings
+and needs plasma-integration installed; "gtk3" follows the GTK theme. Empty
+leaves Qt to its own plain defaults."""
+
+[[item]]
+kind = "string"
+key = "general.gtk_theme"
+parent = "general"
+prompt = "GTK theme"
+default = ""
+apply = "live"
+help = """
+GTK_THEME for programs Tessera starts, e.g. "Adwaita:dark" or "Breeze-Dark".
+Empty leaves GTK to the theme in its own settings."""
+
+[[item]]
+kind = "choice"
+key = "general.mod_key"
+parent = "general"
+prompt = "Modifier key"
+choices = ["auto", "alt", "super"]
+default = "auto"
+apply = "live"
+help = """
+The key every binding is held with ("Mod").
+auto uses Alt while Tessera runs inside another desktop, which keeps Super
+for itself, and Super when Tessera owns the session."""
+
+# ---------------------------------------------------------------- Screens
+
+[[item]]
+kind = "menu"
+id = "display"
+prompt = "Screens"
+
+[[item]]
+kind = "string"
+key = "display.mode"
+parent = "display"
+prompt = "Resolution"
+default = "preferred"
+apply = "live"
+help = """
+The mode Tessera asks each screen for.
+
+"preferred" takes what the screen says it prefers, which for a 4K monitor is
+4K — more than a laptop GPU may comfortably drive. Otherwise give a size,
+optionally with a refresh rate: "1920x1080" or "1920x1080@60".
+
+A screen that has no such mode falls back to the largest one that fits, and
+then to its preferred mode. One setting applies to every screen."""
+
+# ---------------------------------------------------------------- Key bindings
+
+[[item]]
+kind = "menu"
+id = "bindings"
+prompt = "Key bindings"
+
+[[item]]
+kind = "string"
+key = "bindings.launcher"
+parent = "bindings"
+prompt = "Open the launcher"
+default = "Mod+backslash"
+pattern = "binding"
+apply = "live"
+help = """
+Written as modifiers and a key joined with +, e.g. Mod+backslash or
+Mod+Shift+Return. Key names are xkb names: Return, space, backslash, F1."""
+
+[[item]]
+kind = "string"
+key = "bindings.launcher_alt"
+parent = "bindings"
+prompt = "Open the launcher (second binding)"
+default = "Mod+space"
+pattern = "binding"
+apply = "live"
+help = """
+A second way to open the launcher. Host desktops usually take Mod+space
+for their own search while Tessera runs nested, so the first binding is
+the one that works there."""
+
+[[item]]
+kind = "string"
+key = "bindings.terminal"
+parent = "bindings"
+prompt = "Open a terminal"
+default = "Mod+Return"
+pattern = "binding"
+apply = "live"
+help = "Opens the terminal command from General."
+
+[[item]]
+kind = "string"
+key = "bindings.close"
+parent = "bindings"
+prompt = "Close the focused window"
+default = "Mod+q"
+pattern = "binding"
+apply = "live"
+help = "Asks the focused window to close; it may ask to save first."
+
+[[item]]
+kind = "string"
+key = "bindings.quit"
+parent = "bindings"
+prompt = "Quit Tessera"
+default = "Mod+Shift+e"
+pattern = "binding"
+apply = "live"
+help = "Closes every window and ends the session."
+
+# ---------------------------------------------------------------- Layout
+
+[[item]]
+kind = "menu"
+id = "layout"
+prompt = "Tiling layout"
+
+[[item]]
+kind = "int"
+key = "layout.gaps"
+parent = "layout"
+prompt = "Gap between windows (px)"
+default = 8
+min = 0
+max = 64
+apply = "live"
+help = "Space around every tile, and between tiles and the edge of the screen."
+
+[[item]]
+kind = "bool"
+key = "layout.smart_gaps"
+parent = "layout"
+prompt = "No gaps around a lone window"
+default = false
+apply = "live"
+help = "When a workspace holds a single window, let it use the whole screen."
+
+[[item]]
+kind = "bool"
+key = "layout.snap_to_cells"
+parent = "layout"
+prompt = "Snap tile sizes to cell grid"
+default = false
+apply = "live"
+help = """
+Shrink every tile to a whole number of the launcher's character cells,
+putting the spare pixels into the gaps. Cell size comes from the launcher
+font settings, so text-based programs fill their tiles exactly."""
+
+# ---------------------------------------------------------------- Focus
+
+[[item]]
+kind = "menu"
+id = "focus"
+prompt = "Focus"
+
+[[item]]
+kind = "bool"
+key = "focus.new_windows"
+parent = "focus"
+prompt = "New windows take focus"
+default = true
+apply = "live"
+help = "Give keyboard focus to each window as it opens."
+
+[[item]]
+kind = "bool"
+key = "focus.follows_mouse"
+parent = "focus"
+prompt = "Focus follows mouse"
+default = false
+apply = "live"
+help = "Give keyboard focus to whichever window the pointer moves over."
+
+[[item]]
+kind = "bool"
+key = "focus.follows_mouse_skips_launcher"
+parent = "focus"
+prompt = "...except over the launcher"
+default = true
+apply = "live"
+depends_on = "focus.follows_mouse"
+help = """
+Moving the pointer across the launcher does not take focus away from the
+window you were typing in."""
+
+# ---------------------------------------------------------------- Launcher
+
+[[item]]
+kind = "menu"
+id = "launcher"
+prompt = "Launcher"
+
+[[item]]
+kind = "string"
+key = "launcher.font"
+parent = "launcher"
+prompt = "Font"
+default = "JetBrains Mono"
+apply = "restart"
+help = """
+A monospace font family. Takes effect the next time the launcher opens.
+Also decides the cell size used by Snap tile sizes to cell grid."""
+
+[[item]]
+kind = "int"
+key = "launcher.font_size"
+parent = "launcher"
+prompt = "Font size (px)"
+default = 16
+min = 8
+max = 48
+apply = "restart"
+help = "Takes effect the next time the launcher opens."
+
+[[item]]
+kind = "int"
+key = "launcher.beside_share"
+parent = "launcher"
+prompt = "Terminal share when tiled beside (%)"
+default = 60
+min = 10
+max = 90
+apply = "live"
+help = """
+How much of the launcher's tile a terminal takes when it opens beside the
+launcher: from the terminal entry, and from Mod+Return while the launcher
+is open on the current workspace. The launcher itself opens at the rest:
+with 60 here, it takes 40% of the focused window's space."""
+
+[[item]]
+kind = "choice"
+key = "launcher.side"
+parent = "launcher"
+prompt = "Launcher side"
+choices = ["left", "right", "above", "below"]
+default = "left"
+apply = "live"
+help = """
+Which side of the focused window the launcher opens on. Terminals opened
+beside the launcher go on its other side, so the launcher keeps to this
+edge."""

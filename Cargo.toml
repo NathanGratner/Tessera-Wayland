@@ -1,0 +1,47 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[workspace.dependencies]
+# Pinned exactly; reference examples come from ~/src/smithay at tag v0.7.0. See docs/PLAN.md "Pinned versions".
+smithay = { version = "=0.7.0", default-features = false }
+calloop = "0.14"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+
+# S3: launcher UI and cell rendering
+ratatui = { version = "0.30", default-features = false }
+crossterm = "0.29"
+smithay-client-toolkit = "0.21"
+fontdb = "0.24"
+swash = "0.2"
+freedesktop-desktop-entry = "0.8"
+nucleo-matcher = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# S4: IPC between compositor and launcher
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustix = { version = "1", features = ["net"] }
+
+# S5: configuration
+toml_edit = { version = "0.25", features = ["serde"] }
+thiserror = "2"
+
+tessera-cells = { path = "crates/tessera-cells" }
+tessera-config = { path = "crates/tessera-config" }
+tessera-ipc = { path = "crates/tessera-ipc" }
+tessera-services = { path = "crates/tessera-services" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"

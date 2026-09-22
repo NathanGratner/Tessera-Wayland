@@ -1,0 +1,13 @@
+[package]
+name = "tessera-ipc"
+description = "IPC message types shared by the Tessera compositor and launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

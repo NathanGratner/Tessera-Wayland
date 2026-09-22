@@ -1,0 +1,20 @@
+[package]
+name = "tessera-services"
+description = "systemd services shown in Tessera's launcher, and the tessera-serv command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tessera-serv"
+path = "src/main.rs"
+
+[dependencies]
+tessera-config.workspace = true
+toml_edit.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,94 @@
+# Maintainer: Nathan Gratner <nathangratner@gmail.com>
+#
+# Builds Tessera from the current main branch. The binaries, the session entry
+# for display managers, and the documentation all land in the usual places, so
+# pacman can install the libraries Tessera needs and remove it cleanly again.
+#
+#   makepkg -si          build and install
+#   makepkg --printsrcinfo > .SRCINFO    before publishing to the AUR
+#
+# TESSERA_GIT_URL points the build at somewhere else, such as a local clone:
+#   TESSERA_GIT_URL=file:///home/you/Projects/tessera makepkg -si
+
+pkgname=tessera-git
+_pkgname=tessera
+pkgver=0.1.0.r24.gfc9f8c3
+pkgrel=1
+pkgdesc='Tiling Wayland compositor with a menuconfig-style launcher'
+arch=('x86_64' 'aarch64')
+url='https://github.com/NathanGratner/Tessera-Wayland'
+license=('AGPL-3.0-or-later')
+depends=(
+    'gcc-libs'
+    'libdrm'
+    'libinput'
+    'libxkbcommon'
+    'mesa'         # libgbm
+    'libglvnd'     # libEGL
+    'seatd'        # libseat; works with logind too
+    'systemd-libs' # libudev, libsystemd
+)
+makedepends=('cargo' 'git')
+optdepends=(
+    'foot: the default terminal'
+    'ttf-jetbrains-mono: the default launcher font'
+    'nano: the default editor for scripts'
+    'polkit: password prompts when starting or stopping system services'
+    'plasma-integration: Breeze theming for Qt and KDE applications'
+    'socat: talk to the Tessera socket by hand'
+    'greetd: log in to the Tessera session from a display manager'
+)
+provides=("$_pkgname=$pkgver")
+conflicts=("$_pkgname")
+# TESSERA_GIT_URL builds from somewhere else, e.g. a local clone. Whatever it
+# names must be a git repository: the build packages a commit, never a dirty
+# working tree, so what ships is always something that can be checked out again.
+source=("$_pkgname::git+${TESSERA_GIT_URL:-$url.git}")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/$_pkgname"
+    # 0.1.0.r42.g1a2b3c4 — the workspace version, commits since, and the commit.
+    local version
+    version=$(awk -F'"' '/^version/ {print $2; exit}' Cargo.toml)
+    printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$srcdir/$_pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+    cd "$srcdir/$_pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --workspace
+}
+
+check() {
+    cd "$srcdir/$_pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo test --frozen --release --workspace
+}
+
+package() {
+    cd "$srcdir/$_pkgname"
+
+    install -Dm755 target/release/tessera-comp     "$pkgdir/usr/bin/tessera-comp"
+    install -Dm755 target/release/tessera-launcher "$pkgdir/usr/bin/tessera-launcher"
+    install -Dm755 target/release/tessera-serv     "$pkgdir/usr/bin/tessera-serv"
+    install -Dm755 session/tessera-session         "$pkgdir/usr/bin/tessera-session"
+
+    # Display managers read this to offer "Tessera" as a session.
+    install -Dm644 session/tessera.desktop "$pkgdir/usr/share/wayland-sessions/tessera.desktop"
+
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    local doc
+    for doc in USAGE ARCHITECTURE DEPENDENCIES; do
+        install -Dm644 "docs/$doc.md" "$pkgdir/usr/share/doc/$pkgname/$doc.md"
+    done
+}

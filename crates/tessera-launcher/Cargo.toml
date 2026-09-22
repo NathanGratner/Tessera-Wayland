@@ -1,0 +1,24 @@
+[package]
+name = "tessera-launcher"
+description = "Menuconfig-style launcher for the Tessera compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ratatui = { workspace = true, features = ["crossterm_0_29", "std"] }
+crossterm.workspace = true
+freedesktop-desktop-entry.workspace = true
+nucleo-matcher.workspace = true
+smithay-client-toolkit.workspace = true
+tessera-cells.workspace = true
+tessera-ipc.workspace = true
+tessera-config.workspace = true
+tessera-services.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,27 @@
+#!/bin/sh
+# Starts Tessera as a desktop session, for a display manager or from a TTY.
+#
+# A session needs a few environment variables set before the compositor starts;
+# a display manager sets some of them, a bare TTY sets none.
+set -eu
+
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=Tessera
+export XDG_SESSION_DESKTOP=Tessera
+: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR
+
+# Qt and GTK prefer their Wayland backends; without this they look for X11.
+export QT_QPA_PLATFORM=wayland
+export GDK_BACKEND=wayland
+export MOZ_ENABLE_WAYLAND=1
+
+# Hand the session's environment to user services (systemd --user, portals).
+# WAYLAND_DISPLAY is not in the list because the compositor has not created its
+# socket yet; the compositor imports that itself once it has one.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user import-environment \
+        XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP || true
+fi
+
+exec tessera-comp --backend udev "$@"

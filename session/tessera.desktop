@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Tessera
+Comment=Tiling Wayland compositor with a menuconfig-style launcher
+Exec=tessera-session
+Type=Application
+DesktopNames=Tessera
+Keywords=tiling;wayland;compositor;
