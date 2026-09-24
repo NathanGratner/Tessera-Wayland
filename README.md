@@ -1,5 +1,7 @@
 # Tessera
 
+(This repo only has 2 commits because I committed a handoff doc meant for claude that had info specific to my laptop so I just made a new repo) 
+
 A small tiling Wayland compositor with a keyboard-driven launcher drawn on a character grid, in the style of the Linux kernel's `make menuconfig`.
 
 Tessera is two programs that work as a pair:
