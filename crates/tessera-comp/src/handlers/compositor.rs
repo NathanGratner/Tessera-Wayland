@@ -43,6 +43,7 @@ impl CompositorHandler for Tessera {
         }
 
         xdg_shell::handle_commit(&mut self.popups, &self.space, surface);
+        self.layer_commit(surface);
     }
 }
 

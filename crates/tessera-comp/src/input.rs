@@ -10,6 +10,7 @@ use smithay::{
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
     utils::SERIAL_COUNTER,
+    wayland::shell::wlr_layer::Layer,
 };
 use tessera_config::{Binding, ConfigValues};
 
@@ -27,9 +28,10 @@ const LAUNCHER: &str = "tessera-launcher";
 ///
 /// Movement (H/J/K/L with Shift or Ctrl) and workspaces (1–9) stay fixed:
 /// they are systematic sets, not individual keys.
-const CONFIGURABLE: [(&str, Action); 5] = [
+const CONFIGURABLE: [(&str, Action); 6] = [
     ("bindings.launcher", Action::ToggleLauncher),
     ("bindings.launcher_alt", Action::ToggleLauncher),
+    ("bindings.apps", Action::ToggleAppsOverlay),
     ("bindings.terminal", Action::SpawnTerminal),
     ("bindings.close", Action::CloseWindow),
     ("bindings.quit", Action::Quit),
@@ -42,6 +44,8 @@ pub enum Action {
     CloseWindow,
     SpawnTerminal,
     ToggleLauncher,
+    /// Open or close the application overlay.
+    ToggleAppsOverlay,
     Focus(Direction),
     Swap(Direction),
     Resize(Direction),
@@ -61,6 +65,7 @@ impl Action {
             Action::CloseWindow => "close the focused window".into(),
             Action::SpawnTerminal => "open a terminal".into(),
             Action::ToggleLauncher => "open the launcher".into(),
+            Action::ToggleAppsOverlay => "open the application overlay".into(),
             Action::Focus(_) => "move focus".into(),
             Action::Swap(_) => "swap windows".into(),
             Action::Resize(_) => "resize a split".into(),
@@ -305,6 +310,37 @@ impl Tessera {
         }
     }
 
+    /// Lets go of every key Tessera believes is held, as if each had been released.
+    ///
+    /// For when the keyboard is taken away without releases following: the
+    /// nested window losing focus, or a switch to another VT. Clients see the
+    /// releases for keys they saw pressed; bindings do not fire, because they
+    /// only act on presses.
+    pub(crate) fn release_all_keys(&mut self) {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let held = keyboard.pressed_keys();
+        if held.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            keys = held.len(),
+            "keyboard taken away; releasing held keys"
+        );
+        let time = self.start_time.elapsed().as_millis() as u32;
+        for key in held {
+            keyboard.input::<(), _>(
+                self,
+                key,
+                KeyState::Released,
+                SERIAL_COUNTER.next_serial(),
+                time,
+                |_, _, _| FilterResult::Forward,
+            );
+        }
+    }
+
     fn run_action(&mut self, action: Action) {
         tracing::debug!(?action, "binding");
         match action {
@@ -321,6 +357,7 @@ impl Tessera {
                 }
             }
             Action::ToggleLauncher => self.toggle_launcher(LAUNCHER),
+            Action::ToggleAppsOverlay => self.toggle_apps_overlay(LAUNCHER),
             Action::Focus(dir) => self.focus_direction(dir),
             Action::Swap(dir) => self.swap_direction(dir),
             Action::Resize(dir) => self.resize_direction(dir, RESIZE_STEP),
@@ -426,6 +463,14 @@ impl Tessera {
 
     /// Focuses the window under the pointer, for "focus follows mouse".
     fn focus_under_pointer(&mut self, pos: smithay::utils::Point<f64, smithay::utils::Logical>) {
+        // Passing over an overlay or a bar is not passing over the window
+        // beneath it.
+        if self
+            .layer_under(&[Layer::Overlay, Layer::Top], pos)
+            .is_some()
+        {
+            return;
+        }
         let Some(window) = self
             .space
             .element_under(pos)
@@ -454,13 +499,7 @@ impl Tessera {
 
         // Click to focus: the window under the pointer, or nothing when clicking the background.
         if button_state == ButtonState::Pressed && !pointer.is_grabbed() {
-            let window = self
-                .space
-                .element_under(pointer.current_location())
-                .map(|(window, _)| window.clone());
-            if window.as_ref() != self.focus.as_ref() {
-                self.focus_window(window.as_ref());
-            }
+            self.click_to_focus(pointer.current_location());
         }
 
         pointer.button(
@@ -473,6 +512,40 @@ impl Tessera {
             },
         );
         pointer.frame(self);
+    }
+
+    /// Gives focus to what was clicked.
+    ///
+    /// A layer surface that takes a keyboard gets it. A click on a window
+    /// focuses the window, but while an overlay holds the keyboard exclusively
+    /// the keyboard stays with the overlay: the protocol promises it that.
+    fn click_to_focus(&mut self, pos: smithay::utils::Point<f64, smithay::utils::Logical>) {
+        let layer = self
+            .layer_under(&[Layer::Overlay, Layer::Top], pos)
+            .or_else(|| {
+                self.space
+                    .element_under(pos)
+                    .is_none()
+                    .then(|| self.layer_under(&[Layer::Bottom, Layer::Background], pos))
+                    .flatten()
+            });
+        if let Some((layer, _)) = layer {
+            self.focus_layer(&layer);
+            return;
+        }
+
+        if !self.layer_has_exclusive_keyboard() {
+            self.layer_focus = None;
+        }
+        let window = self
+            .space
+            .element_under(pos)
+            .map(|(window, _)| window.clone());
+        if window.as_ref() != self.focus.as_ref() {
+            self.focus_window(window.as_ref());
+        } else {
+            self.update_keyboard_focus();
+        }
     }
 
     fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {

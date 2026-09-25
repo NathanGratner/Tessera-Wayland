@@ -110,6 +110,47 @@ optionally with a refresh rate: "1920x1080" or "1920x1080@60".
 A screen that has no such mode falls back to the largest one that fits, and
 then to its preferred mode. One setting applies to every screen."""
 
+[[item]]
+kind = "choice"
+key = "display.direct_scanout"
+parent = "display"
+choices = ["auto", "on", "off"]
+default = "auto"
+apply = "live"
+prompt = "Hand buffers straight to the screen"
+help = """
+Lets a program's own buffer go to the display hardware without Tessera
+compositing it, which saves work. "auto" turns it off when Tessera is
+rendering in software (a virtual machine without 3D), where it is a likely
+source of regions that stop updating. Turn it off if parts of the screen go
+stale."""
+
+[[item]]
+kind = "choice"
+key = "display.color_depth"
+parent = "display"
+choices = ["auto", "8", "10"]
+default = "auto"
+apply = "restart"
+prompt = "Colour depth"
+help = """
+Bits per colour channel Tessera asks the screen for. "auto" uses 10 on
+hardware and 8 when rendering in software, where 10-bit formats are less well
+tested. Wrong or washed-out colours are the reason to force 8."""
+
+[[item]]
+kind = "bool"
+key = "display.full_repaint"
+parent = "display"
+default = false
+apply = "live"
+prompt = "Repaint the whole screen every frame"
+help = """
+Normally only the parts of the screen that changed are redrawn. This redraws
+everything, every frame: much more work, and a way to find out whether stale
+patches are Tessera tracking changes wrongly. If this fixes them, the fault is
+in Tessera; if it does not, it is the graphics driver."""
+
 # ---------------------------------------------------------------- Key bindings
 
 [[item]]
@@ -141,6 +182,22 @@ help = """
 A second way to open the launcher. Host desktops usually take Mod+space
 for their own search while Tessera runs nested, so the first binding is
 the one that works there."""
+
+[[item]]
+kind = "string"
+key = "bindings.apps"
+parent = "bindings"
+prompt = "Open the application overlay"
+default = "Mod+d"
+pattern = "binding"
+apply = "live"
+help = """
+Opens a list of applications centred over the screen, with the filter
+already on: type part of a name, press Enter, and the application tiles
+beside the window you were in. Esc, or this binding again, closes it.
+
+The full launcher still has the same list under Launch application; this
+is the quick way that leaves the tiles alone. `d` as in dmenu."""
 
 [[item]]
 kind = "string"

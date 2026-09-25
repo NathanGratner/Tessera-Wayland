@@ -147,11 +147,13 @@ fn main() -> anyhow::Result<()> {
     let nested = args.backend == Backend::Winit;
     let mut state = Tessera::new(&mut event_loop, display, ModKey::for_backend(nested))?;
     state.nested = nested;
+    // Before the backend: the udev backend asks the configuration which colour
+    // formats and scan-out behaviour to set a screen up with.
+    state.load_initial_config();
     match args.backend {
         Backend::Winit => backend::winit::init(&mut event_loop, &mut state)?,
         Backend::Udev => backend::udev::init(&mut event_loop, &mut state)?,
     }
-    state.load_initial_config();
 
     // The launcher and any child process find this through TESSERA_SOCKET.
     let socket_path = tessera_ipc::socket_path(&state.socket_name.to_string_lossy());

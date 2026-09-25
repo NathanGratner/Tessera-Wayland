@@ -1,4 +1,8 @@
-//! Wayland front end: the launcher as a tiled window, painting its own cells.
+//! Wayland front end: the launcher as a tiled window, or the application
+//! overlay as a layer surface, painting its own cells either way.
+//!
+//! Only the surface differs between the two. Drawing, input and frame
+//! callbacks are shared, and both kinds of configure feed the same resize.
 
 use crate::{
     app::App,
@@ -31,6 +35,10 @@ use smithay_client_toolkit::{
     },
     shell::{
         WaylandSurface,
+        wlr_layer::{
+            KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+            LayerSurfaceConfigure,
+        },
         xdg::{
             XdgShell,
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
@@ -48,10 +56,52 @@ use tessera_cells::{
 };
 
 pub const APP_ID: &str = "tessera.launcher";
+/// The overlay's layer-shell namespace; the compositor finds it by this name
+/// to close it when the binding is pressed again.
+pub const OVERLAY_NAMESPACE: &str = "tessera.apps";
 const DEFAULT_COLS: u32 = 80;
 const DEFAULT_ROWS: u32 = 24;
+/// The overlay's size in cells, before it is fitted to the screen.
+const OVERLAY_COLS: u32 = 64;
+const OVERLAY_ROWS: u32 = 22;
 
-pub fn run(app: App, font_family: &str, font_size: f32) -> anyhow::Result<()> {
+/// What the launcher draws into.
+enum Shell {
+    /// The full launcher: an `xdg_toplevel`, tiled like any window.
+    Window(Window),
+    /// The application overlay: a layer surface, centred above the windows.
+    Overlay {
+        layer: LayerSurface,
+        /// The size last asked of the compositor, in pixels.
+        requested: (u32, u32),
+    },
+}
+
+impl Shell {
+    fn wl_surface(&self) -> &wl_surface::WlSurface {
+        match self {
+            Shell::Window(window) => window.wl_surface(),
+            Shell::Overlay { layer, .. } => layer.wl_surface(),
+        }
+    }
+}
+
+/// The overlay's size for a screen of `screen` pixels: its usual size, or
+/// less on a screen too small for it, leaving a margin so it still reads as
+/// something floating over the windows.
+fn overlay_size(metrics: &CellMetrics, screen: Option<(u32, u32)>) -> (u32, u32) {
+    let (cell_w, cell_h) = (metrics.width.max(1), metrics.height.max(1));
+    let (mut cols, mut rows) = (OVERLAY_COLS, OVERLAY_ROWS);
+    if let Some((width, height)) = screen {
+        cols = cols.min((width / cell_w).saturating_sub(4)).max(20);
+        rows = rows.min((height / cell_h).saturating_sub(2)).max(8);
+    }
+    (cols * cell_w, rows * cell_h)
+}
+
+/// Runs the launcher on Wayland: the full menu in a window, or with
+/// `overlay`, the application list as a centred layer surface.
+pub fn run(app: App, font_family: &str, font_size: f32, overlay: bool) -> anyhow::Result<()> {
     let font = Font::load(font_family, font_size)
         .with_context(|| format!("could not load the font `{font_family}`"))?;
     let metrics = font.metrics();
@@ -68,26 +118,58 @@ pub fn run(app: App, font_family: &str, font_size: f32) -> anyhow::Result<()> {
 
     let compositor =
         CompositorState::bind(&globals, &qh).map_err(|_| anyhow!("wl_compositor is missing"))?;
-    let xdg_shell = XdgShell::bind(&globals, &qh).map_err(|_| anyhow!("xdg_shell is missing"))?;
     let shm = Shm::bind(&globals, &qh).map_err(|_| anyhow!("wl_shm is missing"))?;
 
     let surface = compositor.create_surface(&qh);
-    let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
-    window.set_title("Tessera launcher");
-    window.set_app_id(APP_ID);
-    window.set_min_size(Some((metrics.width * 20, metrics.height * 8)));
-    window.commit();
-
-    let width = metrics.width * DEFAULT_COLS;
-    let height = metrics.height * DEFAULT_ROWS;
+    let (shell, width, height) = if overlay {
+        let layer_shell = LayerShell::bind(&globals, &qh).map_err(|_| {
+            anyhow!(
+                "this compositor has no layer shell (zwlr_layer_shell_v1), so the overlay \
+                 cannot open; run tessera-launcher without --apps"
+            )
+        })?;
+        let layer = layer_shell.create_layer_surface(
+            &qh,
+            surface,
+            Layer::Overlay,
+            Some(OVERLAY_NAMESPACE),
+            None,
+        );
+        // No anchors: the compositor centres it. Exclusive: it has the
+        // keyboard for as long as it is open, which is what lets you just type.
+        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        // The screen size is not known yet; it is fitted when the output
+        // reports it (see `OutputHandler`).
+        let (width, height) = overlay_size(&metrics, None);
+        layer.set_size(width, height);
+        layer.commit();
+        let shell = Shell::Overlay {
+            layer,
+            requested: (width, height),
+        };
+        (shell, width, height)
+    } else {
+        let xdg_shell =
+            XdgShell::bind(&globals, &qh).map_err(|_| anyhow!("xdg_shell is missing"))?;
+        let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
+        window.set_title("Tessera launcher");
+        window.set_app_id(APP_ID);
+        window.set_min_size(Some((metrics.width * 20, metrics.height * 8)));
+        window.commit();
+        (
+            Shell::Window(window),
+            metrics.width * DEFAULT_COLS,
+            metrics.height * DEFAULT_ROWS,
+        )
+    };
     let pool = SlotPool::new((width * height * 4) as usize, &shm)
         .context("failed to create the shared-memory pool")?;
 
     let palette = Palette::default();
     let backend = CellBackend::new(
         Grid::new(
-            DEFAULT_COLS as u16,
-            DEFAULT_ROWS as u16,
+            (width / metrics.width.max(1)) as u16,
+            (height / metrics.height.max(1)) as u16,
             palette.foreground,
             palette.background,
         ),
@@ -121,7 +203,7 @@ pub fn run(app: App, font_family: &str, font_size: f32) -> anyhow::Result<()> {
         output_state: OutputState::new(&globals, &qh),
         shm,
         pool,
-        window,
+        shell,
         buffer: None,
         width,
         height,
@@ -165,7 +247,7 @@ struct Launcher {
     output_state: OutputState,
     shm: Shm,
     pool: SlotPool,
-    window: Window,
+    shell: Shell,
     buffer: Option<Buffer>,
     width: u32,
     height: u32,
@@ -286,7 +368,7 @@ impl Launcher {
         let damage = paint::paint(grid, &mut self.font, &mut surface);
         self.terminal.backend_mut().grid.clear_dirty();
 
-        let wl_surface = self.window.wl_surface();
+        let wl_surface = self.shell.wl_surface();
         for rect in &damage {
             wl_surface.damage_buffer(rect.x, rect.y, rect.width, rect.height);
         }
@@ -316,6 +398,43 @@ impl Launcher {
             .resize(ratatui::layout::Rect::new(0, 0, cols, rows));
         self.app.update(Event::Resize(cols, rows));
         self.needs_redraw = true;
+    }
+
+    /// A configure arrived, from either kind of surface: take its size (or
+    /// keep ours when it leaves the choice to us) and draw.
+    fn configured(&mut self, qh: &QueueHandle<Self>, size: Option<(u32, u32)>) {
+        let (width, height) = size.unwrap_or((self.width, self.height));
+        self.configured = true;
+        self.resize(width, height);
+        self.needs_redraw = true;
+        self.draw(qh);
+    }
+
+    /// Fits the overlay to a screen whose size has become known.
+    fn fit_overlay(&mut self, output: &wl_output::WlOutput) {
+        let Shell::Overlay { layer, requested } = &mut self.shell else {
+            return;
+        };
+        let Some(info) = self.output_state.info(output) else {
+            return;
+        };
+        let screen = info
+            .logical_size
+            .map(|(w, h)| (w.max(0) as u32, h.max(0) as u32))
+            .or_else(|| {
+                info.modes.iter().find(|mode| mode.current).map(|mode| {
+                    (
+                        mode.dimensions.0.max(0) as u32,
+                        mode.dimensions.1.max(0) as u32,
+                    )
+                })
+            });
+        let size = overlay_size(&self.metrics, screen);
+        if size != *requested {
+            *requested = size;
+            layer.set_size(size.0, size.1);
+            layer.commit();
+        }
     }
 }
 
@@ -429,14 +548,34 @@ impl WindowHandler for Launcher {
         configure: WindowConfigure,
         _serial: u32,
     ) {
-        let (width, height) = match configure.new_size {
-            (Some(width), Some(height)) => (width.get(), height.get()),
-            _ => (self.width, self.height),
+        let size = match configure.new_size {
+            (Some(width), Some(height)) => Some((width.get(), height.get())),
+            _ => None,
         };
-        self.configured = true;
-        self.resize(width, height);
-        self.needs_redraw = true;
-        self.draw(qh);
+        self.configured(qh, size);
+    }
+}
+
+impl LayerShellHandler for Launcher {
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
+        // The compositor closed the overlay, e.g. its binding was pressed again.
+        self.handle(Event::Closed);
+    }
+
+    fn configure(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        _layer: &LayerSurface,
+        configure: LayerSurfaceConfigure,
+        _serial: u32,
+    ) {
+        // Zero on an axis means "your choice": keep the size we asked for.
+        let size = match configure.new_size {
+            (0, _) | (_, 0) => None,
+            size => Some(size),
+        };
+        self.configured(qh, size);
     }
 }
 
@@ -631,16 +770,18 @@ impl OutputHandler for Launcher {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        self.fit_overlay(&output);
     }
 
     fn update_output(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        self.fit_overlay(&output);
     }
 
     fn output_destroyed(
@@ -737,6 +878,23 @@ mod tests {
         let key = translate_key(&key_event(Keysym::a, Some("a")), Mods::default(), false).unwrap();
         assert_eq!(key.code, KeyCode::Char('a'));
         assert_eq!(key.typed(), Some('a'));
+    }
+
+    #[test]
+    fn the_overlay_keeps_its_size_on_a_big_screen_and_shrinks_on_a_small_one() {
+        let metrics = CellMetrics {
+            width: 10,
+            height: 20,
+            baseline: 16,
+            underline: 18,
+        };
+        let usual = (OVERLAY_COLS * 10, OVERLAY_ROWS * 20);
+        assert_eq!(overlay_size(&metrics, None), usual);
+        assert_eq!(overlay_size(&metrics, Some((1920, 1080))), usual);
+        // 800x400: wide enough for every column, but only 20 rows less a margin of 2.
+        assert_eq!(overlay_size(&metrics, Some((800, 400))), (640, 360));
+        // Never smaller than something usable, even on a silly screen.
+        assert_eq!(overlay_size(&metrics, Some((50, 50))), (200, 160));
     }
 
     #[test]

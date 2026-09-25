@@ -1,7 +1,9 @@
 //! Turns the split tree into real window geometry (design §3.3, "Apply").
 
 use smithay::{
-    desktop::Window, wayland::compositor::with_states, wayland::shell::xdg::XdgToplevelSurfaceData,
+    desktop::{Window, layer_map_for_output},
+    wayland::compositor::with_states,
+    wayland::shell::xdg::XdgToplevelSurfaceData,
 };
 
 use super::tree::{Direction, Placement, Rect};
@@ -10,12 +12,16 @@ use crate::state::Tessera;
 /// The launcher identifies itself with this app id (design §5).
 pub const LAUNCHER_APP_ID: &str = "tessera.launcher";
 
+/// The application overlay (`tessera-launcher --apps`) is a layer surface
+/// with this namespace.
+pub const APPS_OVERLAY_NAMESPACE: &str = "tessera.apps";
+
 /// Finds the launcher binary.
 ///
 /// Prefers one sitting next to the compositor, so a freshly built `target/debug`
 /// pair works without putting anything on `PATH`; otherwise the name is left
 /// for the usual `PATH` lookup.
-fn launcher_program(command: &str) -> String {
+pub(crate) fn launcher_program(command: &str) -> String {
     let beside_us = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|dir| dir.join(command)))
@@ -52,18 +58,36 @@ pub fn window_title(window: &Window) -> Option<String> {
 }
 
 impl Tessera {
-    /// The usable area of the first output, in logical coordinates.
+    /// The usable area of the first output, in logical coordinates: the
+    /// screen less any space a layer surface (a bar) reserves.
     pub fn output_area(&self) -> Rect {
-        self.space
-            .outputs()
-            .next()
-            .and_then(|output| self.space.output_geometry(output))
-            .map(|geo| Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h))
-            .unwrap_or_default()
+        let Some(output) = self.space.outputs().next() else {
+            return Rect::default();
+        };
+        let Some(geo) = self.space.output_geometry(output) else {
+            return Rect::default();
+        };
+        let zone = layer_map_for_output(output).non_exclusive_zone();
+        // An empty zone means the layer map has not been arranged for this
+        // screen yet; the whole screen is the right answer then.
+        if zone.size.w <= 0 || zone.size.h <= 0 {
+            return Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h);
+        }
+        Rect::new(
+            geo.loc.x + zone.loc.x,
+            geo.loc.y + zone.loc.y,
+            zone.size.w,
+            zone.size.h,
+        )
     }
 
     /// Sizes and positions every window on the active workspace.
     pub fn apply_layout(&mut self) {
+        // The screen may have changed size, and layer surfaces are placed
+        // against it; they go first because what they reserve shapes the tiles.
+        for output in self.space.outputs() {
+            layer_map_for_output(output).arrange();
+        }
         let area = self.output_area();
         let workspace = &self.workspaces[self.active_workspace];
         let mut opts = self.layout_opts;
@@ -226,6 +250,23 @@ impl Tessera {
                     tracing::warn!(error = %format!("{err:#}"), program, "could not start the launcher");
                 }
             }
+        }
+    }
+
+    /// Closes the application overlay if it is open, otherwise opens it.
+    ///
+    /// The overlay is a layer surface, not a window, so it never enters the
+    /// layout and the tiles do not move. It is started without a pending
+    /// placement for the same reason: nothing will ever be placed for it.
+    pub fn toggle_apps_overlay(&mut self, command: &str) {
+        if let Some(layer) = self.layer_with_namespace(APPS_OVERLAY_NAMESPACE) {
+            layer.layer_surface().send_close();
+            return;
+        }
+        let argv = [launcher_program(command), "--apps".to_string()];
+        match self.spawn_process(&argv, None) {
+            Ok(pid) => tracing::info!(pid, "opened the application overlay"),
+            Err(err) => tracing::warn!(%err, "could not open the application overlay"),
         }
     }
 

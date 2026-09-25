@@ -198,6 +198,9 @@ pub struct App {
     /// False when there is no compositor socket, so placement requests are
     /// impossible and programs are started directly.
     under_tessera: bool,
+    /// The application overlay (`--apps`): only the application list, and
+    /// leaving it or launching from it quits.
+    apps_only: bool,
 }
 
 impl App {
@@ -211,7 +214,22 @@ impl App {
             status: None,
             quit: false,
             under_tessera: tessera_ipc::socket_from_env().is_some(),
+            apps_only: false,
         }
+    }
+
+    /// The application overlay: starts on the application list with the
+    /// filter already on, so typing narrows it straight away. Enter launches
+    /// and quits; Esc quits.
+    pub fn apps_only(catalog: Catalog, config: ConfigValues) -> Self {
+        let mut app = Self::new(catalog, config);
+        app.stack = vec![Screen::Apps {
+            selected: 0,
+            filter: String::new(),
+            filtering: true,
+        }];
+        app.apps_only = true;
+        app
     }
 
     /// Overrides the "running under Tessera" detection, for tests.
@@ -444,6 +462,11 @@ impl App {
 
     fn key_in_filter(&mut self, key: Key) -> Vec<Effect> {
         match key.code {
+            // The overlay is always filtering, so Esc is the way out of it.
+            KeyCode::Esc if self.apps_only => {
+                self.quit = true;
+                return vec![Effect::Quit];
+            }
             KeyCode::Esc => {
                 if let Some(Screen::Apps {
                     filtering, filter, ..
@@ -598,10 +621,16 @@ impl App {
                         wrapper.append(&mut argv);
                         argv = wrapper;
                     }
-                    return vec![Effect::Spawn {
+                    let spawn = Effect::Spawn {
                         argv,
                         placement: Placement::Auto,
-                    }];
+                    };
+                    // The overlay has done its job once something is launched.
+                    if self.apps_only {
+                        self.quit = true;
+                        return vec![spawn, Effect::Quit];
+                    }
+                    return vec![spawn];
                 }
                 self.status = Some("nothing matches that filter".into());
             }
@@ -666,9 +695,13 @@ impl App {
         self.stack.push(screen);
     }
 
+    /// Goes back one screen. In the overlay there is nothing to go back to,
+    /// so leaving the application list quits.
     fn pop(&mut self) {
         if self.stack.len() > 1 {
             self.stack.pop();
+        } else if self.apps_only {
+            self.quit = true;
         }
     }
 
@@ -737,9 +770,15 @@ impl App {
     }
 
     fn view_apps(&self, frame: &mut Frame, selected: usize, filter: &str, filtering: bool) {
-        let area = ui::draw_screen(frame, "tessera-launcher · applications");
         let matches = self.catalog.search(filter);
-        let dialog = ui::centred(area, 60, area.height.saturating_sub(4).min(24));
+        // The overlay's surface is the dialog, sized by the front end, so
+        // there is no screen around it to paint.
+        let dialog = if self.apps_only {
+            frame.area()
+        } else {
+            let area = ui::draw_screen(frame, "tessera-launcher · applications");
+            ui::centred(area, 60, area.height.saturating_sub(4).min(24))
+        };
         let inner = ui::draw_dialog(frame, dialog, "Launch application");
 
         let rows = Layout::vertical([
@@ -766,7 +805,15 @@ impl App {
             .collect();
         self.draw_list(frame, rows[1], items, selected);
 
-        ui::draw_buttons(frame, rows[2], &[("Launch", 'L'), ("Back", 'B')], 0);
+        if self.apps_only {
+            let hint = match &self.status {
+                Some(status) => status.clone(),
+                None => "<Enter> launches.  <Esc> closes.".to_string(),
+            };
+            ui::draw_help(frame, rows[2], &[&hint]);
+        } else {
+            ui::draw_buttons(frame, rows[2], &[("Launch", 'L'), ("Back", 'B')], 0);
+        }
     }
 
     fn view_windows(
@@ -1270,5 +1317,86 @@ mod tests {
                 placement: Placement::Auto,
             }]
         );
+    }
+
+    fn two_apps() -> Catalog {
+        Catalog::from_apps(vec![
+            crate::apps::App {
+                name: "Firefox".into(),
+                description: None,
+                command: "firefox".into(),
+                terminal: false,
+            },
+            crate::apps::App {
+                name: "Calculator".into(),
+                description: None,
+                command: "kcalc".into(),
+                terminal: false,
+            },
+        ])
+    }
+
+    #[test]
+    fn the_overlay_starts_on_the_app_list_already_filtering() {
+        let mut app = App::apps_only(two_apps(), ConfigValues::default());
+        let screen = render(&app);
+        assert!(screen.contains("Launch application"), "{screen}");
+        assert!(screen.contains("Filter: "), "{screen}");
+        assert!(!screen.contains("<Back>"), "{screen}");
+
+        // The first key filters: no `/` needed, and `f` is not a hotkey here.
+        app.update(Event::Key(Key::char('c')));
+        let screen = render(&app);
+        assert!(screen.contains("Filter: c"), "{screen}");
+        assert!(screen.contains("Calculator"), "{screen}");
+        assert!(!screen.contains("Firefox"), "{screen}");
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn launching_from_the_overlay_spawns_tiled_the_usual_way_and_quits() {
+        let mut app = App::apps_only(two_apps(), ConfigValues::default());
+        app.update(Event::Key(Key::char('f')));
+        let effects = press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::Spawn {
+                    argv: vec!["firefox".into()],
+                    placement: Placement::Auto,
+                },
+                Effect::Quit,
+            ]
+        );
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn esc_closes_the_overlay_without_launching() {
+        let mut app = App::apps_only(two_apps(), ConfigValues::default());
+        app.update(Event::Key(Key::char('f')));
+        assert_eq!(press(&mut app, KeyCode::Esc), vec![Effect::Quit]);
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn a_filter_matching_nothing_says_so_and_stays_open() {
+        let mut app = App::apps_only(two_apps(), ConfigValues::default());
+        for ch in "zzz".chars() {
+            app.update(Event::Key(Key::char(ch)));
+        }
+        assert_eq!(press(&mut app, KeyCode::Enter), Vec::new());
+        assert!(!app.should_quit());
+        assert!(render(&app).contains("nothing matches"), "{}", render(&app));
+    }
+
+    #[test]
+    fn the_full_launcher_still_stays_open_after_launching() {
+        let mut app = App::new(two_apps(), ConfigValues::default());
+        app.update(Event::Key(Key::char('l')));
+        app.update(Event::Key(Key::char('f')));
+        let effects = press(&mut app, KeyCode::Enter);
+        assert_eq!(effects.len(), 1, "{effects:?}");
+        assert!(!app.should_quit());
     }
 }

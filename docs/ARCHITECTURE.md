@@ -24,7 +24,7 @@ Two main processes, a small command-line tool, four libraries:
   other clients (foot, alacritty, …) ──── wayland ────▶ tessera-comp
 ```
 
-The launcher is an ordinary Wayland client. It gets no special treatment beyond one key binding and a private socket for requests Wayland deliberately cannot express (such as "open this program next to me").
+The launcher is an ordinary Wayland client. It gets no special treatment beyond two key bindings and a private socket for requests Wayland deliberately cannot express (such as "open this program next to me").
 
 ### The IPC socket (`comp/ipc.rs`, `tessera-ipc`)
 
@@ -65,14 +65,15 @@ After **every** dispatch, the loop callback in `main.rs` refreshes the space, cl
 
 ### State
 
-`state.rs` holds `Tessera`: the Smithay protocol states, the `Space` of mapped windows, nine `LayoutTree`s, which workspace is active, the focused window, the binding table, the script list and the event subscribers. Smithay's `delegate_*!` macros connect each protocol to a handler implemented on this type.
+`state.rs` holds `Tessera`: the Smithay protocol states, the `Space` of mapped windows, nine `LayoutTree`s, which workspace is active, the focused window, the layer surface holding the keyboard (if any), the binding table, the script list and the event subscribers. Smithay's `delegate_*!` macros connect each protocol to a handler implemented on this type.
 
 ### Handlers (`handlers/`)
 
 | File | Protocol | Notable behaviour |
 |------|----------|-------------------|
-| `compositor.rs` | `wl_compositor` | On commit: buffer bookkeeping, then initial configures |
+| `compositor.rs` | `wl_compositor` | On commit: buffer bookkeeping, then initial configures (popups and layer surfaces) |
 | `xdg_shell.rs` | `xdg_shell` | New toplevel → tile it and focus it; destroyed → untile and focus a neighbour |
+| `layer_shell.rs` | `wlr-layer-shell` | Overlays, bars, launchers: placed by each output's `LayerMap`, never tiled. Decides which layer surface holds the keyboard (below) |
 | `decoration.rs` | `xdg-decoration` | Always answers **server side**, so tiles have no client title bars |
 | `seat.rs` | `wl_seat`, `wl_data_device` | Keyboard/pointer focus, clipboard follows keyboard focus |
 | `shm.rs` | `wl_shm` | Shared-memory buffers, which the launcher uses |
@@ -105,6 +106,10 @@ Two placement rules involve the launcher, both in `place.rs`: `launcher_placemen
 
 Key events pass through a filter before reaching the focused client. If the key matches the binding table, the compositor intercepts it and runs an `Action`; otherwise it is forwarded. Bindings are keyed on (modifiers, keysym) using the **unshifted** symbol, so `Mod+Shift+E` matches the `e` key on any layout.
 
+**Focus has two parts.** `Tessera::focus` is the focused *window*: the one new windows tile beside and bindings act on. `Tessera::layer_focus` is a layer surface holding the keyboard instead, such as the application overlay. The keyboard goes to the layer surface when there is one, else to the window (`update_keyboard_focus`). Keeping them apart is what lets the overlay borrow the keyboard without Tessera forgetting the window: what it launches tiles beside that window, and the keyboard returns to it when the overlay closes. A layer surface asking for an `exclusive` keyboard on the overlay or top layer takes it while mapped (`refresh_layer_focus`); an `on_demand` one takes it when clicked. Clicking a window while an exclusive overlay is up focuses the window but leaves the keyboard with the overlay.
+
+**Hit-testing** (`surface_under`) stacks the layers around the windows: overlay and top above them, bottom and background below. Focus-follows-mouse ignores the windows under an overlay or bar.
+
 The table is rebuilt (`rebuild_bindings`) whenever the configuration is applied or the scripts folder is rescanned: fixed keys, then configured ones, then `Bindings::add_scripts`, which refuses any script key already taken and drops both keys when two scripts collide.
 
 ### Scripts (`scripts/`)
@@ -133,6 +138,13 @@ or syncobj support, and with its own 40-line connector scan in place of
 `smithay-drm-extras` (which does not build at the pinned tag on current Arch).
 It owns the `GlesRenderer`, the session (`LibSeatSession`, which also switches
 VTs), libinput, and the `linux-dmabuf` global that lets clients render on the GPU.
+
+Both backends draw layer surfaces without any code of their own: Smithay's
+`space_render_elements` (and `render_output`, which uses it) includes each
+output's layer map. Frame callbacks are not automatic, so both call
+`Tessera::send_frames`, which covers windows **and** layer surfaces; a surface
+left out would draw once and then wait forever. `output_area` is the screen
+less the layer map's exclusive zones, so a bar is never tiled over.
 
 Drawing is driven by the screen: render a frame, queue it, and on the vblank
 draw the next. When a frame has no damage, a timer retries about one refresh
@@ -206,12 +218,14 @@ One app core, two front ends.
 ```
         ┌── frontend/tty.rs      (crossterm; any terminal, ssh included)
 App ────┤
-        └── frontend/wayland.rs  (SCTK window + tessera-cells)
+        └── frontend/wayland.rs  (SCTK window or layer surface + tessera-cells)
 ```
+
+The Wayland front end draws into one of two surfaces (`Shell`): an `xdg_toplevel`, tiled like any window, for the full launcher; or with `--apps`, a layer surface on the overlay layer (namespace `tessera.apps`, no anchors so it is centred, exclusive keyboard), sized to about 64 × 22 cells and fitted to the screen once the output reports its size. Both kinds of configure feed the same resize and draw path.
 
 Both translate their input into the same neutral `event::Event`, so `app.rs` never knows which one is running. That is what lets the UI be developed and tested in a terminal, and unit-tested headlessly with ratatui's `TestBackend`.
 
-- `app.rs` — a stack of screens (`Main`, `Apps`, `Message`), `update(Event) -> Vec<Effect>` and `view(&mut Frame)`. Effects are things only the front end can do: `Spawn { argv, placement }` and `Quit`.
+- `app.rs` — a stack of screens (`Main`, `Apps`, `Message`), `update(Event) -> Vec<Effect>` and `view(&mut Frame)`. Effects are things only the front end can do: `Spawn { argv, placement }` and `Quit`. `App::apps_only` is the overlay's mode: the stack starts on `Apps` with the filter on, leaving it quits, launching quits after the spawn, and the dialog fills the surface instead of sitting on the blue screen.
 - `config_menu.rs` — the configuration screens: menus, input box, choice list, search and help, all generated from the schema. Holds edits between visits.
 - `power_menu.rs` — Power & session: log out (a `Quit` request to the compositor) and suspend, reboot, power off (through `systemctl` on the worker). Every choice asks first, with No selected.
 - `scripts_menu.rs` — Scripts & services: both lists, the output and status box, the add-a-service box. Pure like the app core: keys and results in, effects out.

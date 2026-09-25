@@ -2,8 +2,9 @@ use std::{collections::HashMap, ffi::OsString, process::Command, sync::Arc, time
 
 use anyhow::{Context, anyhow};
 use smithay::{
-    desktop::{PopupManager, Space, Window, WindowSurfaceType},
+    desktop::{LayerSurface, PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
     input::{Seat, SeatState, keyboard::ModifiersState},
+    output::Output,
     reexports::{
         calloop::{
             EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, generic::Generic,
@@ -19,7 +20,10 @@ use smithay::{
         compositor::{CompositorClientState, CompositorState},
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
-        shell::xdg::{XdgShellState, decoration::XdgDecorationState},
+        shell::{
+            wlr_layer::{Layer, WlrLayerShellState},
+            xdg::{XdgShellState, decoration::XdgDecorationState},
+        },
         shm::ShmState,
         socket::ListeningSocketSource,
         xdg_activation::XdgActivationState,
@@ -90,8 +94,17 @@ pub struct Tessera {
     pub active_workspace: usize,
     /// Gaps and cell snapping used when applying a layout.
     pub layout_opts: LayoutOptions,
-    /// The window holding keyboard focus, if any.
+    /// The focused window, if any: the one new windows tile beside and
+    /// bindings act on. It holds the keyboard unless [`Self::layer_focus`] is set.
     pub focus: Option<Window>,
+    /// A layer surface holding the keyboard instead of the focused window,
+    /// such as the application overlay.
+    ///
+    /// Kept apart from [`Self::focus`] so that an overlay borrowing the
+    /// keyboard does not make Tessera forget which window was focused: what is
+    /// launched from it tiles beside that window, and the keyboard goes back to
+    /// it when the overlay closes.
+    pub layer_focus: Option<LayerSurface>,
     /// Key bindings, built from the configuration.
     pub bindings: Bindings,
 
@@ -126,6 +139,8 @@ pub struct Tessera {
     pub compositor_state: CompositorState,
     /// `xdg_shell` state: toplevels and popups.
     pub xdg_shell_state: XdgShellState,
+    /// `wlr-layer-shell` state: overlays, launchers, bars.
+    pub layer_shell_state: WlrLayerShellState,
     /// `xdg-decoration` state; Tessera always answers "server side".
     pub xdg_decoration_state: XdgDecorationState,
     /// `xdg-activation` state, used to match spawned programs to their windows.
@@ -154,6 +169,7 @@ impl Tessera {
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
+        let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
@@ -188,6 +204,7 @@ impl Tessera {
                 snap: None,
             },
             focus: None,
+            layer_focus: None,
             bindings: Bindings::default(),
 
             loop_handle: event_loop.handle(),
@@ -206,6 +223,7 @@ impl Tessera {
 
             compositor_state,
             xdg_shell_state,
+            layer_shell_state,
             xdg_decoration_state,
             xdg_activation_state,
             shm_state,
@@ -316,17 +334,46 @@ impl Tessera {
     }
 
     /// The surface under this point, with its position, for pointer events.
+    ///
+    /// Layers stack around the windows: overlay and top above them, bottom
+    /// and background below.
     pub fn surface_under(
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        self.space
-            .element_under(pos)
-            .and_then(|(window, location)| {
-                window
-                    .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                    .map(|(surface, point)| (surface, (point + location).to_f64()))
+        let in_layer = |layers: &[Layer]| {
+            let (layer, location) = self.layer_under(layers, pos)?;
+            layer
+                .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                .map(|(surface, point)| (surface, (point + location).to_f64()))
+        };
+        in_layer(&[Layer::Overlay, Layer::Top])
+            .or_else(|| {
+                self.space
+                    .element_under(pos)
+                    .and_then(|(window, location)| {
+                        window
+                            .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                            .map(|(surface, point)| (surface, (point + location).to_f64()))
+                    })
             })
+            .or_else(|| in_layer(&[Layer::Bottom, Layer::Background]))
+    }
+
+    /// Lets clients on this screen draw their next frame: its windows and its
+    /// layer surfaces.
+    ///
+    /// A surface that is never sent a frame callback draws once and then
+    /// waits forever, so anything drawn on the screen has to be in here.
+    pub(crate) fn send_frames(&self, output: &Output) {
+        let time = self.start_time.elapsed();
+        let throttle = Some(std::time::Duration::ZERO);
+        for window in self.space.elements() {
+            window.send_frame(output, time, throttle, |_, _| Some(output.clone()));
+        }
+        for layer in layer_map_for_output(output).layers() {
+            layer.send_frame(output, time, throttle, |_, _| Some(output.clone()));
+        }
     }
 
     /// Finds the mapped window owning this toplevel surface.
@@ -353,13 +400,36 @@ impl Tessera {
             toplevel.send_pending_configure();
         }
 
-        let surface = window
-            .and_then(|w| w.toplevel())
-            .map(|t| t.wl_surface().clone());
+        self.update_keyboard_focus();
+    }
+
+    /// Points the keyboard at the layer surface holding it, else at the
+    /// focused window. Does nothing when it is already there.
+    pub(crate) fn update_keyboard_focus(&mut self) {
+        let surface = match &self.layer_focus {
+            Some(layer) => Some(layer.wl_surface().clone()),
+            None => self
+                .focus
+                .as_ref()
+                .and_then(|w| w.toplevel())
+                .map(|t| t.wl_surface().clone()),
+        };
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
-        keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
+        if keyboard.current_focus() != surface {
+            tracing::debug!(
+                to = if self.layer_focus.is_some() {
+                    "layer"
+                } else if surface.is_some() {
+                    "window"
+                } else {
+                    "nothing"
+                },
+                "keyboard focus"
+            );
+            keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
+        }
     }
 }
 

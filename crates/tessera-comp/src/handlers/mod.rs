@@ -4,6 +4,7 @@ mod activation;
 mod compositor;
 mod decoration;
 mod dmabuf;
+mod layer_shell;
 mod output;
 mod seat;
 mod shm;

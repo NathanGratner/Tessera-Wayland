@@ -1,13 +1,13 @@
 # Tessera
 
-(This repo only has 2 commits because I committed a handoff doc meant for claude that had info specific to my laptop so I just made a new repo) 
+Tessera's public history starts in September 2026; development before that happened in a private repository that held notes specific to one machine. Development continues there, and finished work lands here.
 
 A small tiling Wayland compositor with a keyboard-driven launcher drawn on a character grid, in the style of the Linux kernel's `make menuconfig`.
 
 Tessera is two programs that work as a pair:
 
 - **`tessera-comp`** — the compositor. It tiles windows in a binary split tree, has nine workspaces, and is driven from the keyboard.
-- **`tessera-launcher`** — the launcher. It looks like a terminal program but paints its own pixels, so it gets real mouse input, crisp box-drawing lines and exact sizing. It runs as a tiled window inside Tessera, or in any terminal with `--tty`.
+- **`tessera-launcher`** — the launcher. It looks like a terminal program but paints its own pixels, so it gets real mouse input, crisp box-drawing lines and exact sizing. It runs as a tiled window inside Tessera, or in any terminal with `--tty`; its application list also opens on its own, centred over the windows, with `Mod+d`.
 
 Built on [Smithay](https://github.com/Smithay/smithay). Rust, AGPL-3.0-or-later.
 
@@ -30,7 +30,7 @@ cargo build
 cargo run -p tessera-comp -- --nested --spawn foot
 ```
 
-That opens Tessera as a window inside your current desktop, with a terminal tiled inside it. **Alt+\\** opens the launcher (Alt+Space also works, where the host desktop doesn't take it first), **Alt+Return** another terminal, and **Alt+Shift+E** quits.
+That opens Tessera as a window inside your current desktop, with a terminal tiled inside it. **Alt+\\** opens the launcher (Alt+Space also works, where the host desktop doesn't take it first), **Alt+d** just the application list, **Alt+Return** another terminal, and **Alt+Shift+E** quits.
 
 To run it as your actual session instead, install it and log in on a TTY or
 pick **Tessera** in your display manager; see [`docs/USAGE.md`](docs/USAGE.md).

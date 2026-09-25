@@ -1,7 +1,5 @@
 //! Nested backend: Tessera runs as a window inside the host desktop.
 
-use std::time::Duration;
-
 use anyhow::{Context, anyhow};
 use smithay::{
     backend::{
@@ -80,6 +78,11 @@ pub fn init(
                 state.apply_layout();
             }
             WinitEvent::Input(event) => state.process_input_event(event),
+            // The host sends no key releases to a window that has lost the
+            // keyboard, so a key held while leaving (Alt, during Alt+Tab)
+            // would otherwise stay down in here, and every key would then be
+            // Mod+key: Return opening terminals, letters moving focus.
+            WinitEvent::Focus(false) => state.release_all_keys(),
             WinitEvent::Redraw => {
                 let size = backend.window_size();
                 let damage = Rectangle::from_size(size);
@@ -115,14 +118,7 @@ pub fn init(
                     Err(err) => tracing::warn!(err, "failed to render frame"),
                 }
 
-                state.space.elements().for_each(|window| {
-                    window.send_frame(
-                        &output,
-                        state.start_time.elapsed(),
-                        Some(Duration::ZERO),
-                        |_, _| Some(output.clone()),
-                    )
-                });
+                state.send_frames(&output);
 
                 backend.window().request_redraw();
             }

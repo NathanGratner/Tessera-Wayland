@@ -40,6 +40,7 @@ pair in `target/debug` works with no setup; failing that, it is looked up on `PA
 
 | Option | Effect |
 |--------|--------|
+| `--apps` | Only the application list, as an overlay centred over the windows (what `Mod+d` opens). Launching or `Esc` closes it |
 | `--tty` | Run in the current terminal instead of opening a window |
 | `--font <family>` | Font for the window front end (default: JetBrains Mono) |
 | `--font-size <px>` | Font size in pixels (default: 16) |
@@ -77,6 +78,7 @@ Workspaces are independent tiling trees. Hidden ones keep their layout.
 |---------|--------|
 | `Mod+Return` | Open a terminal (the one set in Configuration → General). While the launcher is open on this workspace, the terminal opens beside it at the configured share, exactly as the launcher's Terminal entry does; otherwise it tiles the usual way |
 | `Mod+Space` or `Mod+\` | Focus the launcher, or start it if it isn't running. It opens on its configured side of the focused window (Configuration → Launcher). Use `Mod+\` while nested: Plasma and GNOME keep Mod+Space for their own search |
+| `Mod+d` | Open the application overlay, or close it if it is open (see below) |
 | A script's `bind` | Run that script, whether or not the launcher is open (see Scripts & services) |
 | `Mod+Shift+E` | Quit Tessera |
 | `Ctrl+Alt+F1` … `F12` | Switch virtual terminal (when Tessera is the session). This is the way out if something goes wrong |
@@ -136,6 +138,14 @@ protocol, which Tessera does not implement.
 
 The application list reads `.desktop` files from `$XDG_DATA_DIRS/applications` and `~/.local/share/applications`. Typing filters them fuzzily; applications marked `Terminal=true` are launched inside a terminal.
 
+### The application overlay
+
+`Mod+d` opens just the application list, centred over whatever is on screen, without opening the launcher or moving any tile. The filter is already on, so type part of a name and press **Enter**: the application tiles beside the window you were in, the usual way, and the overlay closes. **Esc**, or `Mod+d` again, closes it without launching anything. `↑` `↓` move the selection.
+
+The overlay holds the keyboard while it is open; Tessera's own bindings still work. It is the same list as **Launch application**, and the binding is configurable (Configuration → Bindings).
+
+It is a `wlr-layer-shell` surface rather than a window, which is why it floats instead of tiling. That also means other layer-shell programs work in Tessera: launchers such as fuzzel or wofi, and bars such as waybar, which get the screen edge they ask for while the tiles fit in the rest.
+
 ---
 
 ## Running Tessera as your session
@@ -172,6 +182,29 @@ your GPU. No root, and no X11.
 which is what a display manager gives you. From a TTY it prints as usual. Runs
 are appended, so the log of a session that died survives the next start; past
 2 MB the old one becomes `tessera.log.1`.
+
+### Running without graphics acceleration
+
+Tessera works where EGL falls back to a software driver — a virtual machine
+without 3D, for instance — but every frame is then composited by the CPU. The
+log says which renderer it got:
+
+```
+renderer ready  driver=virtio_gpu software=true bits=8 direct_scanout=false
+```
+
+`software=true` also changes two defaults, because the software and virtual
+paths are less well travelled than a real GPU's: colour depth drops to 8 bits,
+and buffers are no longer handed straight to the display hardware. Both can be
+forced either way in Configuration → Screens.
+
+**Known issue:** input can misbehave on these systems (seen in a virtual
+machine), and is not fixed yet. The picture itself is correct.
+
+If it is slow, the pixel count is usually the reason: **lower the resolution**.
+Tessera warns once in the log when a frame takes longer than the screen's
+refresh interval, which is also when input starts to feel late — the event loop
+is drawing when it could be reading the keyboard.
 
 ### What Tessera tells the programs it starts
 
@@ -311,7 +344,7 @@ A value that breaks a rule is refused where you typed it, with the rule: *"999 i
 
 Written as modifiers and a key joined with `+`: `Mod+Shift+Return`, `Mod+backslash`, `Mod+Ctrl+F1`. `Mod` is required, so Tessera never takes a key away from the program you are typing in. Key names are xkb's (`Return`, `space`, `backslash`, `Escape`, `F1`); single letters are case-insensitive. An unknown name is refused when you save.
 
-Configurable: open the launcher (two bindings), open a terminal, close a window, quit. Moving focus, swapping, resizing and switching workspaces stay on `H/J/K/L` and `1–9`. Scripts bind their own keys in their headers.
+Configurable: open the launcher (two bindings), open the application overlay, open a terminal, close a window, quit. Moving focus, swapping, resizing and switching workspaces stay on `H/J/K/L` and `1–9`. Scripts bind their own keys in their headers.
 
 ### Other settings worth knowing
 
@@ -319,6 +352,9 @@ Configurable: open the launcher (two bindings), open a terminal, close a window,
 |---------|-------|--------------|
 | Editor | General | What `E` opens scripts in; `nano` by default. Arguments are allowed |
 | Resolution | Screens | The mode Tessera asks each screen for: `preferred`, or a size like `1920x1080` or `1920x1080@60`. Applies at once |
+| Hand buffers straight to the screen | Screens | Lets a program's buffer reach the display hardware uncomposited. `auto` turns it off when rendering in software |
+| Colour depth | Screens | Bits per channel: `auto` (10 on hardware, 8 in software), or force `8` or `10`. Next start |
+| Repaint the whole screen every frame | Screens | Much more work; a way to find out whether stale patches are Tessera's fault |
 | Qt theme plugin | General | `QT_QPA_PLATFORMTHEME` for programs Tessera starts. `kde` (the default) gives KDE apps Breeze and your KDE settings, and needs `plasma-integration`. Empty leaves Qt plain |
 | GTK theme | General | `GTK_THEME` for programs Tessera starts, e.g. `Breeze-Dark`. Empty leaves GTK to its own settings |
 | Terminal share when tiled beside (%) | Launcher | A terminal's share of the launcher's tile; the launcher opens at the rest |
@@ -371,6 +407,8 @@ Scripts are named by file name, not by their header's `name`.
 
 ## Troubleshooting
 
+**Every key acts like a binding** (Return opens a terminal, letters move focus). Tessera thinks the Mod key is still held. Nested, this happened when Alt was held as focus left the window (Alt+Tab); Tessera now lets go of held keys when it loses the keyboard. If it happens anyway, press and release the Mod key once.
+
 **The launcher doesn't open.** While nested, the host desktop may take `Mod+Space` first (Plasma opens KRunner) — use **`Mod+\`** instead. If neither works, check the log for `could not start the launcher`: the binary is looked for next to `tessera-comp` and then on `PATH`.
 
 **Everything freezes while the screen is locked.** Fixed — clients are flushed from the event loop rather than the redraw path. If something similar reappears, check `RUST_LOG=debug` for `failed to flush clients`.
@@ -404,7 +442,16 @@ Logging out and back in does the same thing.
 **Everything crawls on a 4K screen.** Tessera draws the whole screen every
 frame, and on an integrated GPU 4K is four times the work of 1080p. Set
 Configuration → Screens → *Resolution* to `1920x1080`; it applies at once, with
-no need to unplug anything.
+no need to unplug anything. The same applies, more so, without graphics
+acceleration.
+
+**Parts of the screen stop updating, showing old content.** Only the regions
+that changed are redrawn each frame, so a region wrongly believed unchanged
+keeps what it had. To find out where the fault lies, turn on Configuration →
+Screens → *Repaint the whole screen every frame*: if the stale patches go away,
+it is Tessera tracking changes wrongly and worth reporting; if they remain, it
+is the graphics driver, and turning *Hand buffers straight to the screen* off
+is the next thing to try. Both apply at once.
 
 **A window opened in the wrong place.** Placement matching waits up to 3 seconds for the window and falls back to "the oldest waiting spawn" for programs it cannot identify (single-instance terminals such as `footclient`). Starting two such programs at once can swap their placements.
 

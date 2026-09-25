@@ -32,7 +32,7 @@ use smithay::{
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
-        egl::{EGLContext, EGLDisplay},
+        egl::{EGLContext, EGLDevice, EGLDisplay},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             ImportDma,
@@ -51,7 +51,10 @@ use smithay::{
             EventLoop, RegistrationToken,
             timer::{TimeoutAction, Timer},
         },
-        drm::control::{Device as _, ModeTypeFlags, connector, crtc},
+        drm::{
+            Device as _,
+            control::{Device as _, ModeTypeFlags, connector, crtc},
+        },
         input::Libinput,
         rustix::fs::OFlags,
         wayland_server::backend::GlobalId,
@@ -62,13 +65,44 @@ use smithay::{
 
 use crate::state::Tessera;
 
-/// Formats a scan-out buffer may use, best first.
-const COLOR_FORMATS: &[Fourcc] = &[
-    Fourcc::Abgr2101010,
-    Fourcc::Argb2101010,
-    Fourcc::Abgr8888,
-    Fourcc::Argb8888,
-];
+/// Eight bits per channel, which every driver handles.
+const FORMATS_8BIT: &[Fourcc] = &[Fourcc::Abgr8888, Fourcc::Argb8888];
+/// Ten bits per channel, preferred where the driver is trusted.
+const FORMATS_10BIT: &[Fourcc] = &[Fourcc::Abgr2101010, Fourcc::Argb2101010];
+
+/// The formats to offer a screen, from `display.color_depth`.
+///
+/// Ten-bit formats come first on hardware. When Tessera renders in software
+/// they are left out: that path is far less travelled, and a driver that
+/// mishandles a format shows it as wrong colours or worse.
+pub fn color_formats(setting: &str, software: bool) -> Vec<Fourcc> {
+    let ten_bit = match setting {
+        "8" => false,
+        "10" => true,
+        // "auto", and anything unexpected.
+        _ => !software,
+    };
+    let mut formats = Vec::new();
+    if ten_bit {
+        formats.extend_from_slice(FORMATS_10BIT);
+    }
+    formats.extend_from_slice(FORMATS_8BIT);
+    formats
+}
+
+/// Whether a program's buffer may go straight to the display hardware, from
+/// `display.direct_scanout`.
+///
+/// Off by default in software rendering: a buffer on a plane is not composited
+/// by us, so a driver that mishandles a plane update leaves a region of the
+/// screen that stops changing — which is what was seen in a VM.
+pub fn allow_scanout(setting: &str, software: bool) -> bool {
+    match setting {
+        "on" => true,
+        "off" => false,
+        _ => !software,
+    }
+}
 
 /// The desktop background, matching the nested backend.
 const BACKGROUND: [f32; 4] = [0.08, 0.10, 0.14, 1.0];
@@ -120,6 +154,16 @@ pub struct Udev {
     active: bool,
     /// Identifies the pointer element across frames, for damage tracking.
     cursor_id: Id,
+    /// Tells the damage tracker when the pointer element actually changed.
+    cursor_commit: CommitCounter,
+    /// Where the pointer was drawn last, to know when that is.
+    cursor_at: Option<(i32, i32)>,
+    /// True when EGL gave us a software driver (llvmpipe in a VM, say).
+    software: bool,
+    /// The kernel driver's name, for the log.
+    driver: String,
+    /// A frame has already been reported as slower than the screen's refresh.
+    slow_frame_logged: bool,
     _drm_token: RegistrationToken,
 }
 
@@ -160,9 +204,44 @@ pub fn init(
     // SAFETY: the display is kept alive by the context, which the renderer owns.
     let egl_display =
         unsafe { EGLDisplay::new(gbm.clone()) }.context("cannot open an EGL display")?;
+    // Which renderer we ended up with is worth knowing before anything looks
+    // wrong: software rendering changes what is sensible to ask of a screen.
+    let software = match EGLDevice::device_for_display(&egl_display) {
+        Ok(device) => device.is_software(),
+        Err(err) => {
+            tracing::debug!(%err, "cannot tell whether EGL is a software device");
+            false
+        }
+    };
+    let driver = drm
+        .get_driver()
+        .map(|driver| driver.name().to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "unknown".into());
+
     let context = EGLContext::new(&egl_display).context("cannot create an EGL context")?;
     // SAFETY: the context is current on this thread only, and the compositor is single-threaded.
     let renderer = unsafe { GlesRenderer::new(context) }.context("cannot create a GL renderer")?;
+
+    let formats = color_formats(&state.settings.text("display.color_depth"), software);
+    let scanout = allow_scanout(&state.settings.text("display.direct_scanout"), software);
+    if software {
+        tracing::warn!(
+            driver,
+            "EGL gave a software renderer: every frame is composited on the CPU, so expect it to \
+             be slow. A lower resolution (Configuration -> Screens) is the usual remedy."
+        );
+    }
+    tracing::info!(
+        driver,
+        software,
+        bits = if formats.contains(&Fourcc::Abgr2101010) {
+            10
+        } else {
+            8
+        },
+        direct_scanout = scanout,
+        "renderer ready"
+    );
 
     let render_formats = renderer.egl_context().dmabuf_render_formats().clone();
     let manager = DrmOutputManager::new(
@@ -176,7 +255,7 @@ pub fn init(
             node.node_with_type(NodeType::Render).and_then(Result::ok),
         ),
         Some(gbm),
-        COLOR_FORMATS.iter().copied(),
+        formats,
         render_formats,
     );
 
@@ -197,6 +276,11 @@ pub fn init(
         dmabuf: None,
         active: true,
         cursor_id: Id::new(),
+        cursor_commit: CommitCounter::default(),
+        cursor_at: None,
+        software,
+        driver,
+        slow_frame_logged: false,
         _drm_token: drm_token,
     }));
 
@@ -270,6 +354,9 @@ fn init_session_events(
         .insert_source(notifier, move |event, _, state| match event {
             SessionEvent::PauseSession => {
                 tracing::info!("session paused: another VT has the screen");
+                // Ctrl and Alt are down right now (that is how the VT switch
+                // was asked for), and their releases go to the other VT.
+                state.release_all_keys();
                 if let Some(libinput) = state.libinput.as_mut() {
                     libinput.suspend();
                 }
@@ -525,6 +612,8 @@ impl Tessera {
     /// Draws one screen and queues the frame.
     pub(crate) fn render_screen(&mut self, crtc: crtc::Handle) {
         let pointer = self.pointer_location;
+        let scanout_setting = self.settings.text("display.direct_scanout");
+        let full_repaint = self.settings.bool("display.full_repaint");
         let Some(udev) = self.udev.as_mut() else {
             return;
         };
@@ -551,10 +640,18 @@ impl Tessera {
             let location = (pointer - geometry.loc.to_f64()).to_i32_round::<i32>();
             let position: smithay::utils::Point<i32, smithay::utils::Physical> =
                 (location.x, location.y).into();
+            // The commit counter is how an element says "my contents changed".
+            // A constant told the damage tracker the pointer never changes,
+            // which is untrue, and exactly the sort of lie that leaves parts of
+            // a screen stale.
+            if udev.cursor_at != Some((location.x, location.y)) {
+                udev.cursor_commit.increment();
+                udev.cursor_at = Some((location.x, location.y));
+            }
             elements.push(ScreenElement::Cursor(SolidColorRenderElement::new(
                 udev.cursor_id.clone(),
                 Rectangle::new(position, (CURSOR_SIZE, CURSOR_SIZE).into()),
-                CommitCounter::default(),
+                udev.cursor_commit,
                 [0.9, 0.9, 0.9, 1.0],
                 Kind::Cursor,
             )));
@@ -567,15 +664,49 @@ impl Tessera {
             }
         }
 
+        let flags = if allow_scanout(&scanout_setting, udev.software) {
+            FrameFlags::DEFAULT
+        } else {
+            FrameFlags::empty()
+        };
+        // Throwing the buffers away makes the next frame redraw everything,
+        // which is how to tell "Tessera tracked damage wrongly" from "the driver
+        // did": with this on, damage tracking cannot be the cause.
+        if full_repaint {
+            screen.drm_output.reset_buffers();
+        }
+
+        let started = std::time::Instant::now();
         let rendered = screen
             .drm_output
-            .render_frame(
-                &mut udev.renderer,
-                &elements,
-                BACKGROUND,
-                FrameFlags::DEFAULT,
-            )
+            .render_frame(&mut udev.renderer, &elements, BACKGROUND, flags)
             .map(|result| !result.is_empty);
+        let elapsed = started.elapsed();
+        tracing::debug!(
+            ?crtc,
+            ?elapsed,
+            damage = matches!(rendered, Ok(true)),
+            "frame"
+        );
+        // A frame slower than the refresh interval means the screen is waiting
+        // on us, and so is everything else in the loop, input included.
+        let refresh = output
+            .current_mode()
+            .map(|mode| Duration::from_micros(1_000_000_000 / mode.refresh.max(1) as u64));
+        if let Some(refresh) = refresh
+            && elapsed > refresh
+            && !udev.slow_frame_logged
+        {
+            udev.slow_frame_logged = true;
+            tracing::warn!(
+                ?elapsed,
+                ?refresh,
+                software = udev.software,
+                driver = udev.driver,
+                "a frame took longer than the screen's refresh interval; input will feel late. \
+                 A lower resolution (Configuration -> Screens) is the usual remedy."
+            );
+        }
 
         match rendered {
             Ok(true) => match screen.drm_output.queue_frame(()) {
@@ -630,16 +761,6 @@ impl Tessera {
         let output = screen.output.clone();
         self.send_frames(&output);
         self.render_screen(crtc);
-    }
-
-    /// Lets clients on this screen draw their next frame.
-    fn send_frames(&self, output: &Output) {
-        let time = self.start_time.elapsed();
-        for window in self.space.elements() {
-            window.send_frame(output, time, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
-        }
     }
 
     /// Redraws every screen, e.g. after the layout changed.
@@ -1037,6 +1158,36 @@ mod tests {
                 preferred: false,
             },
         ]
+    }
+
+    #[test]
+    fn colour_depth_follows_the_setting_and_the_renderer() {
+        // Hardware: ten bits first, eight still offered as a fallback.
+        let hardware = color_formats("auto", false);
+        assert_eq!(hardware.first(), Some(&Fourcc::Abgr2101010));
+        assert!(hardware.contains(&Fourcc::Argb8888));
+
+        assert_eq!(color_formats("auto", true), FORMATS_8BIT.to_vec());
+        assert_eq!(color_formats("8", false), FORMATS_8BIT.to_vec());
+        assert_eq!(
+            color_formats("10", true).first(),
+            Some(&Fourcc::Abgr2101010),
+            "forced ten-bit even in software"
+        );
+        assert_eq!(
+            color_formats("nonsense", true),
+            FORMATS_8BIT.to_vec(),
+            "an unreadable setting behaves like auto"
+        );
+    }
+
+    #[test]
+    fn direct_scanout_is_off_in_software_unless_asked_for() {
+        assert!(allow_scanout("auto", false));
+        assert!(!allow_scanout("auto", true));
+        assert!(allow_scanout("on", true), "forced on even in software");
+        assert!(!allow_scanout("off", false));
+        assert!(!allow_scanout("nonsense", true));
     }
 
     #[test]
